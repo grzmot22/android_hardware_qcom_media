@@ -24,6 +24,8 @@
 
 #include <binder/MemoryDealer.h>
 
+#include <gui/Surface.h>
+
 #include <media/stagefright/foundation/hexdump.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
@@ -31,7 +33,6 @@
 
 #include <media/stagefright/MediaCodecList.h>
 #include <media/stagefright/MediaDefs.h>
-#include <media/stagefright/NativeWindowWrapper.h>
 #include <media/stagefright/OMXClient.h>
 #include <media/stagefright/OMXCodec.h>
 
@@ -61,6 +62,16 @@ static void InitOMXParams(T *params) {
     params->nVersion.s.nStep = 0;
 }
 
+struct MessageList : public RefBase {
+    MessageList() {
+    }
+    std::list<sp<AMessage> > &getList() { return mList; }
+private:
+    std::list<sp<AMessage> > mList;
+
+    DISALLOW_EVIL_CONSTRUCTORS(MessageList);
+};
+
 struct CodecObserver : public BnOMXObserver {
     CodecObserver() {}
 
@@ -69,58 +80,72 @@ struct CodecObserver : public BnOMXObserver {
     }
 
     // from IOMXObserver
-    virtual void onMessage(const omx_message &omx_msg) {
-        sp<AMessage> msg = mNotify->dup();
-
-        msg->setInt32("type", omx_msg.type);
-        msg->setInt32("node", omx_msg.node);
-
-        switch (omx_msg.type) {
-            case omx_message::EVENT:
-            {
-                msg->setInt32("event", omx_msg.u.event_data.event);
-                msg->setInt32("data1", omx_msg.u.event_data.data1);
-                msg->setInt32("data2", omx_msg.u.event_data.data2);
-                break;
-            }
-
-            case omx_message::EMPTY_BUFFER_DONE:
-            {
-                msg->setInt32("buffer", omx_msg.u.buffer_data.buffer);
-                break;
-            }
-
-            case omx_message::FILL_BUFFER_DONE:
-            {
-                msg->setInt32(
-                        "buffer", omx_msg.u.extended_buffer_data.buffer);
-                msg->setInt32(
-                        "range_offset",
-                        omx_msg.u.extended_buffer_data.range_offset);
-                msg->setInt32(
-                        "range_length",
-                        omx_msg.u.extended_buffer_data.range_length);
-                msg->setInt32(
-                        "flags",
-                        omx_msg.u.extended_buffer_data.flags);
-                msg->setInt64(
-                        "timestamp",
-                        omx_msg.u.extended_buffer_data.timestamp);
-                //msg->setPointer(
-                //        "platform_private",
-                //        omx_msg.u.extended_buffer_data.platform_private);
-                //msg->setPointer(
-                //        "data_ptr",
-                //        omx_msg.u.extended_buffer_data.data_ptr);
-                break;
-            }
-
-            default:
-                TRESPASS();
-                break;
+    virtual void onMessages(const std::list<omx_message> &messages) {
+        if (messages.empty()) {
+            return;
         }
 
-        msg->post();
+        sp<AMessage> notify = mNotify->dup();
+        bool first = true;
+        sp<MessageList> msgList = new MessageList();
+        for (std::list<omx_message>::const_iterator it = messages.cbegin();
+                it != messages.cend(); ++it) {
+            const omx_message &omx_msg = *it;
+            if (first) {
+                notify->setInt32("node", omx_msg.node);
+                first = false;
+            }
+
+            sp<AMessage> msg = new AMessage;
+            msg->setInt32("type", omx_msg.type);
+            switch (omx_msg.type) {
+                case omx_message::EVENT:
+                {
+                    msg->setInt32("event", omx_msg.u.event_data.event);
+                    msg->setInt32("data1", omx_msg.u.event_data.data1);
+                    msg->setInt32("data2", omx_msg.u.event_data.data2);
+                    break;
+                }
+
+                case omx_message::EMPTY_BUFFER_DONE:
+                {
+                    msg->setInt32("buffer", omx_msg.u.buffer_data.buffer);
+                    break;
+                }
+
+                case omx_message::FILL_BUFFER_DONE:
+                {
+                    msg->setInt32(
+                            "buffer", omx_msg.u.extended_buffer_data.buffer);
+                    msg->setInt32(
+                            "range_offset",
+                            omx_msg.u.extended_buffer_data.range_offset);
+                    msg->setInt32(
+                            "range_length",
+                            omx_msg.u.extended_buffer_data.range_length);
+                    msg->setInt32(
+                            "flags",
+                            omx_msg.u.extended_buffer_data.flags);
+                    msg->setInt64(
+                            "timestamp",
+                            omx_msg.u.extended_buffer_data.timestamp);
+                    //msg->setPointer(
+                    //        "platform_private",
+                    //        omx_msg.u.extended_buffer_data.platform_private);
+                    //msg->setPointer(
+                    //        "data_ptr",
+                    //        omx_msg.u.extended_buffer_data.data_ptr);
+                    break;
+                }
+
+                default:
+                    TRESPASS();
+                    break;
+            }
+            msgList->getList().push_back(msg);
+        }
+        notify->setObject("messages", msgList);
+        notify->post();
     }
 
 protected:
@@ -409,43 +434,43 @@ void DashCodec::setNotificationMessage(const sp<AMessage> &msg) {
 
 void DashCodec::initiateSetup(const sp<AMessage> &msg) {
     msg->setWhat(kWhatSetup);
-    msg->setTarget(id());
+    msg->setTarget(this);
     msg->post();
 }
 
 void DashCodec::initiateAllocateComponent(const sp<AMessage> &msg) {
     msg->setWhat(kWhatAllocateComponent);
-    msg->setTarget(id());
+    msg->setTarget(this);
     msg->post();
 }
 
 void DashCodec::initiateConfigureComponent(const sp<AMessage> &msg) {
     msg->setWhat(kWhatConfigureComponent);
-    msg->setTarget(id());
+    msg->setTarget(this);
     msg->post();
 }
 
 void DashCodec::initiateStart() {
-    (new AMessage(kWhatStart, id()))->post();
+    (new AMessage(kWhatStart, this))->post();
 }
 
 void DashCodec::signalFlush() {
     ALOGV("[%s] signalFlush", mComponentName.c_str());
-    (new AMessage(kWhatFlush, id()))->post();
+    (new AMessage(kWhatFlush, this))->post();
 }
 
 void DashCodec::signalResume() {
-    (new AMessage(kWhatResume, id()))->post();
+    (new AMessage(kWhatResume, this))->post();
 }
 
 void DashCodec::initiateShutdown(bool keepComponentAllocated) {
-    sp<AMessage> msg = new AMessage(kWhatShutdown, id());
+    sp<AMessage> msg = new AMessage(kWhatShutdown, this);
     msg->setInt32("keepComponentAllocated", keepComponentAllocated);
     msg->post();
 }
 
 void DashCodec::signalRequestIDRFrame() {
-    (new AMessage(kWhatRequestIDRFrame, id()))->post();
+    (new AMessage(kWhatRequestIDRFrame, this))->post();
 }
 
 status_t DashCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
@@ -497,9 +522,9 @@ status_t DashCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
                     info.mData = new ABuffer(ptr, def.nBufferSize);
                 } else if (mQuirks & requiresAllocateBufferBit) {
                     err = mOMX->allocateBufferWithBackup(
-                            mNode, portIndex, mem, &info.mBufferID);
+                            mNode, portIndex, mem, &info.mBufferID, def.nBufferSize);
                 } else {
-                    err = mOMX->useBuffer(mNode, portIndex, mem, &info.mBufferID);
+                    err = mOMX->useBuffer(mNode, portIndex, mem, &info.mBufferID, def.nBufferSize);
                 }
 
                 if (mem != NULL) {
@@ -980,9 +1005,8 @@ status_t DashCodec::configureCodec(
             // crop window, and we don't trust that they will be able to.
             int usageBits = 0;
 
-            sp<NativeWindowWrapper> windowWrapper(
-                    static_cast<NativeWindowWrapper *>(obj.get()));
-            sp<ANativeWindow> nativeWindow = windowWrapper->getNativeWindow();
+            sp<ANativeWindow> nativeWindow =
+                static_cast<ANativeWindow *>(static_cast<Surface *>(obj.get()));
 
             if (nativeWindow->query(
                     nativeWindow.get(),
@@ -2748,7 +2772,7 @@ void DashCodec::BaseState::postFillThisBuffer(BufferInfo *info) {
     info->mData->meta()->clear();
     notify->setBuffer("buffer", info->mData);
 
-    sp<AMessage> reply = new AMessage(kWhatInputBufferFilled, mCodec->id());
+    sp<AMessage> reply = new AMessage(kWhatInputBufferFilled, mCodec);
     reply->setInt32("buffer-id", info->mBufferID);
 
     notify->setMessage("reply", reply);
@@ -3027,7 +3051,7 @@ bool DashCodec::BaseState::onOMXFillBufferDone(
             notify->setBuffer("buffer", info->mData);
             notify->setInt32("flags", flags);
             sp<AMessage> reply =
-                new AMessage(kWhatOutputBufferDrained, mCodec->id());
+                new AMessage(kWhatOutputBufferDrained, mCodec);
 
            if (!mCodec->mPostFormat && mCodec->mAdaptivePlayback){
                  ALOGV("Resolution will change from this buffer, set a flag");
@@ -3251,7 +3275,7 @@ bool DashCodec::UninitializedState::onAllocateComponent(const sp<AMessage> &msg)
         componentName = matchingCodecs.itemAt(matchIndex).mName.string();
         quirks = matchingCodecs.itemAt(matchIndex).mQuirks;
 
-        pid_t tid = androidGetTid();
+        pid_t tid = gettid();
         int prevPriority = androidGetThreadPriority(tid);
         androidSetThreadPriority(tid, ANDROID_PRIORITY_FOREGROUND);
         status_t err = omx->allocateNode(componentName.c_str(), observer, &node);
@@ -3276,7 +3300,7 @@ bool DashCodec::UninitializedState::onAllocateComponent(const sp<AMessage> &msg)
         return false;
     }
 
-    sp<AMessage> notify = new AMessage(kWhatOMXMessage, mCodec->id());
+    sp<AMessage> notify = new AMessage(kWhatOMXMessage, mCodec);
     observer->setNotificationMessage(notify);
 
     mCodec->mComponentName = componentName;
@@ -3410,10 +3434,8 @@ bool DashCodec::LoadedState::onConfigureComponent(
     sp<RefBase> obj;
     if (msg->findObject("native-window", &obj)
             && strncmp("OMX.google.", mCodec->mComponentName.c_str(), 11)) {
-        sp<NativeWindowWrapper> nativeWindow(
-                static_cast<NativeWindowWrapper *>(obj.get()));
-        CHECK(nativeWindow != NULL);
-        mCodec->mNativeWindow = nativeWindow->getNativeWindow();
+        mCodec->mNativeWindow = static_cast<Surface *>(obj.get());
+        CHECK(mCodec->mNativeWindow != NULL);
 
         native_window_set_scaling_mode(
                 mCodec->mNativeWindow.get(),
@@ -4050,7 +4072,7 @@ bool DashCodec::FlushingState::onOMXEvent(
 
         case OMX_EventPortSettingsChanged:
         {
-            sp<AMessage> msg = new AMessage(kWhatOMXMessage, mCodec->id());
+            sp<AMessage> msg = new AMessage(kWhatOMXMessage, mCodec);
             msg->setInt32("type", omx_message::EVENT);
             msg->setInt32("node", mCodec->mNode);
             msg->setInt32("event", event);
@@ -4171,7 +4193,7 @@ bool DashCodec::FlushingOutputState::onOMXEvent(
 
         case OMX_EventPortSettingsChanged:
         {
-            sp<AMessage> msg = new AMessage(kWhatOMXMessage, mCodec->id());
+            sp<AMessage> msg = new AMessage(kWhatOMXMessage, mCodec);
             msg->setInt32("type", omx_message::EVENT);
             msg->setInt32("node", mCodec->mNode);
             msg->setInt32("event", event);
